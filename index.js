@@ -80,6 +80,21 @@ async function initializeBot() {
         role: "assistant",
         content: fullResponse,
       });
+
+      // Save the message and response to PocketBase
+      const data = {
+        user_chat: userMessage,
+        bot_chat: fullResponse,
+        chat_id: ctx.chat.id.toString(),
+        username: ctx.from.username || "",
+      };
+
+      try {
+        const record = await pb.collection("ai_chat").create(data);
+        console.log("Message saved to database:", record);
+      } catch (error) {
+        console.error("Error saving message to database:", error);
+      }
     } catch (error) {
       console.error("Error communicating with Ollama", error);
       ctx.reply("Sorry, something went wrong while processing your request.");
