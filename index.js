@@ -2,109 +2,121 @@ require("dotenv").config();
 const { Telegraf } = require("telegraf");
 const { Ollama } = require("ollama");
 const PocketBase = require("pocketbase/cjs");
+const QRCode = require('qrcode');
+const fs = require('fs').promises;
+
+// Configuration
+const config = {
+  TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
+  OLLAMA_MODEL: process.env.OLLAMA_MODEL || "llama2:latest",
+  OLLAMA_HOST: process.env.OLLAMA_HOST || "http://192.168.50.112:11222",
+  POCKETBASE_URL: process.env.POCKETBASE_URL || "https://end.redruby.one",
+};
+
+// Initialize services
+const pb = new PocketBase(config.POCKETBASE_URL);
+const ollama = new Ollama({ host: config.OLLAMA_HOST });
+const bot = new Telegraf(config.TELEGRAM_BOT_TOKEN);
 
 const chatHistories = {};
 
-async function initializeBot() {
-  const pb = new PocketBase("https://end.redruby.one");
-  const ollama = new Ollama({ host: "http://192.168.50.112:11222" });
-  const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
-
-  bot.start(async (ctx) => {
-    const record = await pb.collection("ai").getOne("yqk60ik0w95061p");
-    chatHistories[ctx.chat.id] = [
-      {
-        role: "system",
-        content: record.role,
-      },
-    ];
-    ctx.reply("Welcome! I'm Uran! Let's-a go!");
-  });
-
-  bot.help((ctx) => ctx.reply("Ask me anything, and I'll answer as Uran"));
-
-  bot.on("text", async (ctx) => {
-    try {
-      const userMessage = ctx.message.text;
-      const record = await pb.collection("ai").getOne("yqk60ik0w95061p");
-
-      if (!chatHistories[ctx.chat.id]) {
-        chatHistories[ctx.chat.id] = [
-          {
-            role: "system",
-            content: record.role,
-          },
-        ];
-      } else {
-        chatHistories[ctx.chat.id][0].content = record.role;
-      }
-
-      chatHistories[ctx.chat.id].push({ role: "user", content: userMessage });
-
-      let fullResponse = "";
-      let messageSent = false;
-
-      const stream = await ollama.chat({
-        model: process.env.OLLAMA_MODEL || "llama3:latest",
-        messages: chatHistories[ctx.chat.id],
-        stream: true,
-      });
-
-      for await (const part of stream) {
-        fullResponse += part.message.content;
-
-        // Send the first chunk immediately
-        if (!messageSent) {
-          await ctx.reply(fullResponse);
-          messageSent = true;
-        }
-
-        // Update the message every 20 chunks or when the stream ends
-        if (fullResponse.length % 20 === 0 || part.done) {
-          try {
-            await ctx.telegram.editMessageText(
-              ctx.chat.id,
-              ctx.message.message_id + 1,
-              null,
-              fullResponse
-            );
-          } catch (error) {
-            console.error("Error updating message:", error);
-          }
-        }
-
-        if (part.done) break;
-      }
-
-      chatHistories[ctx.chat.id].push({
-        role: "assistant",
-        content: fullResponse,
-      });
-
-      // Save the message and response to PocketBase
-      const data = {
-        user_chat: userMessage,
-        bot_chat: fullResponse,
-        chat_id: ctx.chat.id.toString(),
-        username: ctx.from.username || "",
-      };
-
-      try {
-        const record = await pb.collection("ai_chat").create(data);
-        console.log("Message saved to database:", record);
-      } catch (error) {
-        console.error("Error saving message to database:", error);
-      }
-    } catch (error) {
-      console.error("Error communicating with Ollama", error);
-      ctx.reply("Sorry, something went wrong while processing your request.");
-    }
-  });
-
-  bot.launch();
-
-  process.once("SIGINT", () => bot.stop("SIGINT"));
-  process.once("SIGTERM", () => bot.stop("SIGTERM"));
+async function getSystemRole() {
+  try {
+    const records = await pb.collection('posts').getFullList({ sort: '-created' });
+    return `You are a search engine. Respond in max 20 words. Format answers as:
+    ----------------------
+    1:ID
+    2:TEXT
+    3:INFO
+    ----------------------
+    Multiple posts separated by new lines. If no match:
+    ----------------------
+    No match
+    ----------------------
+    Posts: ${records.map(post => `ID: ${post.id}, Text: ${post.text}, Info: ${post.info}`).join('\n')}
+    Total posts: ${records.length}`;
+  } catch (error) {
+    console.error("Error fetching posts for system role:", error);
+    return "You are Uran, a helpful AI assistant.";
+  }
 }
 
-initializeBot();
+async function streamResponse(ctx, messages) {
+  let fullResponse = "";
+  let lastUpdateLength = 0;
+  const stream = await ollama.chat({ model: config.OLLAMA_MODEL, messages, stream: true });
+  const sentMessage = await ctx.reply("Thinking...");
+
+  for await (const part of stream) {
+    fullResponse += part.message.content;
+    if (fullResponse.length - lastUpdateLength >= 10 || part.done) {
+      try {
+        await ctx.telegram.editMessageText(ctx.chat.id, sentMessage.message_id, null, fullResponse);
+        lastUpdateLength = fullResponse.length;
+      } catch (error) {
+        if (error.description !== "Bad Request: message is not modified") {
+          console.error("Error updating message:", error);
+        }
+      }
+    }
+    if (part.done) break;
+  }
+  return fullResponse;
+}
+
+bot.start(async (ctx) => {
+  chatHistories[ctx.chat.id] = [{ role: "system", content: await getSystemRole() }];
+  ctx.reply("Welcome! Let's-a go!", {
+    reply_markup: {
+      keyboard: [
+        [{ text: "🆘 Help" }, { text: "🚀 Start Chat" }, { text: "ℹ️ About" }]
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: false
+    }
+  });
+});
+
+bot.hears(['🆘 Help', '/help'], async (ctx) => {
+  try {
+    const qrCodeFilePath = './qrcode.png';
+    await QRCode.toFile(qrCodeFilePath, 'https://t.me/urangpt');
+    await ctx.replyWithPhoto(
+      { source: qrCodeFilePath },
+      { caption: "Scan this QR code to share the bot!" }
+    );
+    await fs.unlink(qrCodeFilePath);
+  } catch (error) {
+    console.error('Error with QR code:', error);
+    await ctx.reply('Sorry, there was an error generating the QR code.');
+  }
+});
+
+bot.on("text", async (ctx) => {
+  try {
+    if (!chatHistories[ctx.chat.id]) {
+      chatHistories[ctx.chat.id] = [{ role: "system", content: await getSystemRole() }];
+    }
+    chatHistories[ctx.chat.id].push({ role: "user", content: ctx.message.text });
+    const fullResponse = await streamResponse(ctx, chatHistories[ctx.chat.id]);
+    chatHistories[ctx.chat.id].push({ role: "assistant", content: fullResponse });
+  } catch (error) {
+    console.error("Error processing request:", error);
+    ctx.reply("Sorry, something went wrong while processing your request.");
+  }
+});
+
+bot.launch()
+  .then(() => {
+    console.log(`
+    ╔════════════════════════════════════════════════╗
+    ║   Welcome! Uran Bot is now online!             ║
+    ║   Model: ${config.OLLAMA_MODEL}                ║
+    ║   Ollama Host: ${config.OLLAMA_HOST}           ║
+    ╚════════════════════════════════════════════════╝
+    `);
+  })
+  .catch(() => console.log("Failed to launch the bot."));
+
+process.once("SIGINT", () => bot.stop("SIGINT"));
+process.once("SIGTERM", () => bot.stop("SIGTERM"));

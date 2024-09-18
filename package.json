@@ -4,14 +4,20 @@
   "description": "telegram bot using ai",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
     "dotenv": "^16.4.5",
-    "ollama": "^0.5.8",
-    "pocketbase": "^0.21.4",
+    "ollama": "^0.5.9",
+    "pocketbase": "^0.21.5",
+    "qrcode": "^1.5.4",
     "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
   }
 }
